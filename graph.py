@@ -1,7 +1,6 @@
 """
 B-rep face adjacency graph from a STEP file.
-Required: pip install pythonocc-core networkx matplotlib [pyvista]
-Run: python brep_to_graph.py --step /path/to/model.step
+Run: python graph.py --step /path/to/model.step
 
 """
 
@@ -115,8 +114,6 @@ def _surface_type_for_face(face: TopoDS_Face):
 def build_face_adjacency(faces_list):
     # edge_key -> list of face_ids incident to that edge
     edge_to_faces: dict[int, list[int]] = {}
-    # edge_key -> length (for total_shared_edge_length between pairs)
-    edge_length: dict[int, float] = {}
 
     for face_id, face in enumerate(faces_list):
         exp = TopExp_Explorer(face, TopAbs_EDGE)
@@ -127,9 +124,6 @@ def build_face_adjacency(faces_list):
             key = _edge_key(edge)
             if key not in edge_to_faces:
                 edge_to_faces[key] = []
-                gprop = GProp_GProps()
-                BRepGProp.LinearProperties_s(edge, gprop)
-                edge_length[key] = gprop.Mass()
             if face_id not in edge_to_faces[key]:
                 edge_to_faces[key].append(face_id)
             exp.Next()
@@ -140,10 +134,9 @@ def build_face_adjacency(faces_list):
                 surface_type = _surface_type_for_face(faces_list[fid]), 
                 flag = False)
 
-    # (i, j) -> (shared_count, total_length)
-    pair_data: dict[tuple[int, int], tuple[int, float]] = {}
+    # (i, j) -> shared_count
+    pair_data: dict[tuple[int, int], int] = {}
     for _ek, fids in edge_to_faces.items():
-        length = edge_length.get(_ek, 0.0)
         for ii in range(len(fids)):
             for jj in range(ii + 1, len(fids)):
                 i, j = fids[ii], fids[jj]
@@ -151,15 +144,15 @@ def build_face_adjacency(faces_list):
                     i, j = j, i
                 key = (i, j)
                 if key not in pair_data:
-                    pair_data[key] = (0, 0.0)
-                c, L = pair_data[key]
-                pair_data[key] = (c + 1, L + length)
+                    pair_data[key] = 0
+                pair_data[key] = pair_data[key] + 1
 
-    for (i, j), (count, length) in pair_data.items():
-        G.add_edge(i, j, shared_edge_count=count, total_shared_edge_length=length)
+    for (i, j), count in pair_data.items():
+        G.add_edge(i, j, shared_edge_count=count)
 
     return G
 
+# We need to also add normal to compare the angle between faces
 def compute_face_attributes(face) :
     adaptor = BRepAdaptor_Surface(face, True)
     stype = adaptor.GetType()
@@ -202,9 +195,8 @@ def plot_graph(G, title = "Face adjacency graph"):
     if not edges:
         widths = []
     else:
-        lengths = [G.edges[e].get("total_shared_edge_length", 0.0) for e in edges]
-        max_l = max(lengths) if lengths else 1.0
-        widths = [1.0 + 3.0 * (L / max_l) for L in lengths]
+        # Use a constant width now that edge length is not tracked
+        widths = [2.0 for _ in edges]
 
     nx.draw(
         G,
@@ -308,7 +300,7 @@ def main() -> int:
     G = build_face_adjacency(faces_list)    
     attach_face_attributes(G, faces_list)
     print(G)
-    # print_face_table(G)
+    print_face_table(G)
     # plot_graph(G, title=f"Face adjacency: {step_path}")
     # visualize_3d(shape, faces_list, face_id_map, mesh_deflection=0.001)
     return 0

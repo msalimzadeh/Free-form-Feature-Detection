@@ -23,7 +23,12 @@ def pick_face_on_mesh(mesh: pv.PolyData):
         picked_cells.append(cid)
 
     plotter = pv.Plotter()
-    plotter.add_mesh(mesh)
+    base_color = np.array([200, 200, 200], dtype=np.uint8)
+    n_cells = mesh.n_cells
+    colors = np.tile(base_color, (n_cells, 1))
+
+    mesh.cell_data["colors"] = colors
+    plotter.add_mesh(mesh, scalars="colors", rgb=True)
     plotter.enable_surface_point_picking(callback=_on_pick)
     plotter.show()
 
@@ -44,16 +49,9 @@ def pick_face_on_mesh(mesh: pv.PolyData):
 def read_step_from_user(step_path):
     
     reader = STEPControl_Reader()
-    status = reader.ReadFile(step_path)
-    if status != 1:
-        print(f"Failed to read STEP file: {step_path}", file=sys.stderr)
-        raise SystemExit(1)
-
+    reader.ReadFile(step_path)
     reader.TransferRoots()
     shape = reader.OneShape()
-    if shape.IsNull():
-        print(f"STEP file produced null shape: {step_path}", file=sys.stderr)
-        raise SystemExit(1)
 
     # Collect faces
     faces_list: list[TopoDS_Face] = []
@@ -62,17 +60,11 @@ def read_step_from_user(step_path):
         face = TopoDS.Face_s(exp.Current())
         faces_list.append(face)
         exp.Next()
-
     print(f"Loaded STEP: {step_path}  ({len(faces_list)} faces)")
     return shape, faces_list
 
 
-def _build_face_mesh(
-    shape: TopoDS_Shape,
-    faces_list: list[TopoDS_Face],
-    mesh_deflection: float = 0.001,
-    angular_deflection: float = 0.5,
-) -> pv.PolyData | None:
+def _build_face_mesh(shape, faces_list, mesh_deflection = 0.001, angular_deflection = 0.5):
     """
     Tessellate the shape and build a PyVista mesh with cell_data['face_id']
     so that each triangle knows which B-rep face it came from.
@@ -121,15 +113,8 @@ def _build_face_mesh(
     return poly
 
 # Volume removal visualization
-def build_mesh_for_shape(
-    shape: TopoDS_Shape,
-    mesh_deflection: float = 0.001,
-    angular_deflection: float = 0.5,
-) -> pv.PolyData | None:
-    """
-    Build a PyVista mesh from any TopoDS_Shape by exploring its faces.
-    Use for visualizing arbitrary shapes (e.g. removal volume).
-    """
+def build_mesh_for_shape(shape, mesh_deflection= 0.001, angular_deflection = 0.5):
+
     faces_list: list[TopoDS_Face] = []
     exp = TopExp_Explorer(shape, TopAbs_FACE)
     while exp.More():
@@ -145,11 +130,7 @@ def build_mesh_for_shape(
     )
 
 
-def pick_brep_face(
-    shape: TopoDS_Shape,
-    faces_list: list[TopoDS_Face],
-    mesh_deflection: float = 0.001,
-) -> TopoDS_Face | None:
+def pick_brep_face( shape, faces_list, mesh_deflection = 0.001):
     mesh = _build_face_mesh(shape, faces_list, mesh_deflection=mesh_deflection)
     if mesh is None:
         return None
@@ -161,22 +142,12 @@ def pick_brep_face(
     return None
 
 
-def visualize_faces_on_mesh(
-    shape: TopoDS_Shape,
-    faces_list: list[TopoDS_Face],
-    selected_face_ids: list[int],
-    mesh_deflection: float = 0.001,
-) -> None:
-    """
-    Build a mesh for the given STEP shape and visualize it with the
-    specified faces highlighted.
-    """
+def visualize_faces_on_mesh(shape, faces_list, selected_face_ids, mesh_deflection = 0.001):
     mesh = _build_face_mesh(shape, faces_list, mesh_deflection=mesh_deflection)
     if mesh is None:
         return
-
     if not selected_face_ids:
-        selected_ids_set: set[int] = set()
+        selected_ids_set = set()
     else:
         selected_ids_set = set(int(i) for i in selected_face_ids)
 
