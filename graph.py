@@ -6,6 +6,7 @@ Run: python graph.py --step /path/to/model.step
 
 from __future__ import annotations
 import argparse
+import math
 import sys
 from typing import Any
 from OCP.STEPControl import STEPControl_Reader
@@ -13,7 +14,10 @@ from OCP.TopExp import TopExp_Explorer
 from OCP.TopAbs import TopAbs_FACE, TopAbs_EDGE, TopAbs_VERTEX
 from OCP.TopoDS import TopoDS_Shape, TopoDS_Face, TopoDS_Edge, TopoDS
 from OCP.BRep import BRep_Tool
-from OCP.BRepAdaptor import BRepAdaptor_Surface
+from OCP.BRepAdaptor import BRepAdaptor_Surface, BRepAdaptor_Curve
+from OCP.BRepLProp import BRepLProp_SLProps
+from OCP.ShapeAnalysis import ShapeAnalysis_Surface
+from OCP.gp import gp_Pnt, gp_Dir
 from OCP.GeomAbs import (
     GeomAbs_Plane,
     GeomAbs_Cylinder,
@@ -171,6 +175,77 @@ def compute_face_attributes(face) :
     }
 
 
+def _find_shared_edge(
+    face1: TopoDS_Face, face2: TopoDS_Face
+) -> TopoDS_Edge | None:
+    """Return the first shared edge between two faces, or None."""
+    edges1: dict[tuple, TopoDS_Edge] = {}
+    exp = TopExp_Explorer(face1, TopAbs_EDGE)
+    while exp.More():
+        edge = TopoDS.Edge_s(exp.Current())
+        edges1[_edge_key(edge)] = edge
+        exp.Next()
+
+    exp = TopExp_Explorer(face2, TopAbs_EDGE)
+    while exp.More():
+        edge = TopoDS.Edge_s(exp.Current())
+        if _edge_key(edge) in edges1:
+            return edge
+        exp.Next()
+    return None
+
+
+def _face_normal_at_point(face: TopoDS_Face, point: gp_Pnt) -> gp_Dir:
+    """Compute the outward surface normal of *face* at a 3D *point* lying on it."""
+    surf = BRep_Tool.Surface_s(face)
+    uv = ShapeAnalysis_Surface(surf).ValueOfUV(point, 1e-7)
+
+    adaptor = BRepAdaptor_Surface(face, False)
+    props = BRepLProp_SLProps(adaptor, uv.X(), uv.Y(), 1, 1e-6)
+    if not props.IsNormalDefined():
+        raise ValueError("Surface normal is undefined at the given point.")
+
+    normal = props.Normal()
+    if face.Orientation() == TopAbs_Orientation.TopAbs_REVERSED:
+        normal.Reverse()
+    return normal
+
+
+def compute_angle_between_faces(
+    face1: TopoDS_Face, face2: TopoDS_Face
+) -> float:
+    """Return the angle (degrees) between the outward normals of two adjacent
+    B-rep faces, evaluated at the midpoint of their shared edge.
+
+    Result range [0, 180]:
+        0   -> faces are tangent (smooth, normals point the same way)
+        90  -> faces are perpendicular
+        180 -> normals point in opposite directions
+    """
+    shared_edge = _find_shared_edge(face1, face2)
+    if shared_edge is None:
+        #raise ValueError("The two faces do not share an edge.")
+        return float("nan")
+    curve = BRepAdaptor_Curve(shared_edge)
+    u_mid = 0.5 * (curve.FirstParameter() + curve.LastParameter())
+    mid_point = curve.Value(u_mid)
+
+    n1 = _face_normal_at_point(face1, mid_point)
+    n2 = _face_normal_at_point(face2, mid_point)
+    return math.degrees(n1.Angle(n2))
+
+
+def attach_edge_angles(G: nx.Graph, faces_list: list) -> None:
+    """Compute the angle for every adjacency in *G* and store it as the
+    ``angle_deg`` edge attribute."""
+    for u, v in G.edges():
+        try:
+            angle = compute_angle_between_faces(faces_list[u], faces_list[v])
+        except ValueError:
+            angle = float("nan")
+        G.edges[u, v]["angle_deg"] = angle
+
+
 def attach_face_attributes(G, faces_list):
     for face_id, face in enumerate(faces_list):
         if not G.has_node(face_id):
@@ -217,7 +292,7 @@ def tessellate_shape(shape, linear_deflection = 0.001, angular_deflection = 0.5)
     mesh = BRepMesh_IncrementalMesh(shape, linear_deflection, False, angular_deflection, True)
     mesh.Perform()
 
-def visualize_3d(shape, faces_list, face_id_map, mesh_deflection = 0.001, angular_deflection = 0.5):
+def visualize_3d(shape, faces_list, face_id_map, G: nx.Graph | None = None, mesh_deflection = 0.001, angular_deflection = 0.5):
 
     tessellate_shape(shape, mesh_deflection, angular_deflection)
 
@@ -266,6 +341,10 @@ def visualize_3d(shape, faces_list, face_id_map, mesh_deflection = 0.001, angula
         face = faces_list[fid]
         attrs = compute_face_attributes(face)
         print(f"\nPicked face_id={fid}  surface_type={attrs['surface_type']}  area={attrs['area']:.6f}  centroid={attrs['centroid']}")
+        if G is not None and G.has_node(fid):
+            for neighbour in G.neighbors(fid):
+                angle = compute_angle_between_faces(face, faces_list[neighbour])
+                print(f"  -> neighbour face_id={neighbour}  angle={angle:.1f}°")
 
     plotter.enable_surface_point_picking(callback=on_pick, show_message=False)
     plotter.show()
@@ -299,10 +378,14 @@ def main() -> int:
     faces_list, face_id_map = iter_faces(shape)
     G = build_face_adjacency(faces_list)    
     attach_face_attributes(G, faces_list)
-    print(G)
-    print_face_table(G)
+    attach_edge_angles(G, faces_list)
+    # print(G)
+    # print_face_table(G)
     # plot_graph(G, title=f"Face adjacency: {step_path}")
-    # visualize_3d(shape, faces_list, face_id_map, mesh_deflection=0.001)
+    visualize_3d(shape, faces_list, face_id_map, G=G, mesh_deflection=0.001)
+
+    # for u, v, data in G.edges(data=True):
+    #     print(f"Face {u} <-> Face {v}: {data['angle_deg']:.1f}°")
     return 0
 
 if __name__ == "__main__":

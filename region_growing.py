@@ -1,10 +1,11 @@
+import math
 from collections import deque
 from typing import Set
 
 import networkx as nx
 
 
-def grow_region(G: nx.Graph, seed_face_id: int) -> Set[int]:
+def grow_region(G: nx.Graph, seed_face_id: int, angle_threshold: float = 10.0) -> Set[int]:
     def is_plane(node_id: int) -> bool:
         return G.nodes[node_id].get("surface_type") == "Plane"
     region: Set[int] = set()
@@ -20,6 +21,10 @@ def grow_region(G: nx.Graph, seed_face_id: int) -> Set[int]:
         region.add(current)
         G.nodes[current]["flag"] = True
         for nbr in G.neighbors(current):
-            if nbr not in region:
-                queue.append(nbr)
+            if nbr in region:
+                continue
+            angle = G.edges[current, nbr].get("angle_deg", 0.0)
+            if math.isnan(angle) or angle > angle_threshold:
+                continue
+            queue.append(nbr)
     return region

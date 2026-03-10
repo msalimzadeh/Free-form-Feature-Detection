@@ -31,6 +31,7 @@ def main() -> int:
     faces_list, face_id_map = iter_faces(shape)
     G = build_face_adjacency(faces_list)    
     attach_face_attributes(G, faces_list)
+    attach_edge_angles(G, faces_list)
     # print_face_table(G)
     # plot_graph(G, title=f"Face adjacency: {step_path}")
     # visualize_3d(shape, faces_list, face_id_map, mesh_deflection=0.001)
@@ -51,7 +52,7 @@ def main() -> int:
     # Extrude the detected patch to obtain a feature volume (prism)
     removal_prism = extrude_feature_patch(
         detected_patch_faces,
-        direction=(0,1,0),   # machining direction
+        direction=(0,0,1),   # machining direction
         length=20,          # large enough to reach stock top
     )
 
