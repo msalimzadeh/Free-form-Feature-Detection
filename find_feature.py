@@ -23,12 +23,12 @@ def main() -> int:
         stock_path = None
 
     # Load part and stock shapes
-    shape = load_step(step_path)  # finished part
+    shape, faces_list = read_step_from_user(step_path)  # finished part
     if stock_path:
         stock_shape = read_step_solid(stock_path)
     else:
         stock_shape = None
-    faces_list, face_id_map = iter_faces(shape)
+    face_id_map = iter_faces(faces_list)
     G = build_face_adjacency(faces_list)    
     attach_face_attributes(G, faces_list)
     attach_edge_angles(G, faces_list)

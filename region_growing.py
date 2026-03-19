@@ -5,7 +5,7 @@ from typing import Set
 import networkx as nx
 
 
-def grow_region(G: nx.Graph, seed_face_id: int, angle_threshold: float = 10.0) -> Set[int]:
+def grow_region(G: nx.Graph, seed_face_id: int, angle_threshold: float = 40.0) -> Set[int]:
     def is_plane(node_id: int) -> bool:
         return G.nodes[node_id].get("surface_type") == "Plane"
     region: Set[int] = set()

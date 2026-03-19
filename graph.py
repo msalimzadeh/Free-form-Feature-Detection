@@ -3,7 +3,6 @@ B-rep face adjacency graph from a STEP file.
 Run: python graph.py --step /path/to/model.step
 
 """
-
 from __future__ import annotations
 import argparse
 import math
@@ -16,6 +15,7 @@ from OCP.TopoDS import TopoDS_Shape, TopoDS_Face, TopoDS_Edge, TopoDS
 from OCP.BRep import BRep_Tool
 from OCP.BRepAdaptor import BRepAdaptor_Surface, BRepAdaptor_Curve
 from OCP.BRepLProp import BRepLProp_SLProps
+from OCP.BRepTools import BRepTools
 from OCP.ShapeAnalysis import ShapeAnalysis_Surface
 from OCP.gp import gp_Pnt, gp_Dir
 from OCP.GeomAbs import (
@@ -41,6 +41,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 import pyvista as pv
 
+from config import read_step_from_user
 SURFACE_TYPE_MAP = {
     GeomAbs_Plane: "Plane",
     GeomAbs_Cylinder: "Cylinder",
@@ -69,12 +70,6 @@ SURFACE_TYPE_COLOR = {
     "Other": "#9E9E9E",
 }
 
-def load_step(path: str):
-    reader = STEPControl_Reader()
-    reader.ReadFile(path)
-    reader.TransferRoots()
-    shape = reader.OneShape()
-    return shape
 
 def shape_hash(shape: TopoDS_Shape) -> int:
     try:
@@ -97,18 +92,11 @@ def _edge_key(edge: TopoDS_Edge):
     return tuple(verts)
 
 # Face ID mapping
-def iter_faces(shape: TopoDS_Shape):
-    faces_list: list[Any] = []
-    explorer = TopExp_Explorer(shape, TopAbs_FACE)
-    while explorer.More():
-        face = TopoDS.Face_s(explorer.Current())
-        faces_list.append(face)
-        explorer.Next()
-    # Optional lookup map if needed elsewhere, does not affect adjacency
+def iter_faces(faces_list):
     face_key_to_id: dict[int, int] = {
         shape_hash(face): idx for idx, face in enumerate(faces_list)
     }
-    return faces_list, face_key_to_id
+    return face_key_to_id
 
 def _surface_type_for_face(face: TopoDS_Face):
     adaptor = BRepAdaptor_Surface(face, True)
@@ -167,17 +155,22 @@ def compute_face_attributes(face) :
     area = gprop.Mass()
     centre = gprop.CentreOfMass()
     centroid = (centre.X(), centre.Y(), centre.Z())
+    normal = compute_face_normal(face)
+    curvature = compute_face_curvature(face)
 
     return {
         "surface_type": surface_type,
         "area": area,
         "centroid": centroid,
+        "normal": normal,
+        "k_min": curvature["k_min"],
+        "k_max": curvature["k_max"],
+        "k_mean": curvature["k_mean"],
+        "k_gaussian": curvature["k_gaussian"],
     }
 
 
-def _find_shared_edge(
-    face1: TopoDS_Face, face2: TopoDS_Face
-) -> TopoDS_Edge | None:
+def _find_shared_edge(face1, face2):
     """Return the first shared edge between two faces, or None."""
     edges1: dict[tuple, TopoDS_Edge] = {}
     exp = TopExp_Explorer(face1, TopAbs_EDGE)
@@ -195,7 +188,7 @@ def _find_shared_edge(
     return None
 
 
-def _face_normal_at_point(face: TopoDS_Face, point: gp_Pnt) -> gp_Dir:
+def _face_normal_at_point(face, point):
     """Compute the outward surface normal of *face* at a 3D *point* lying on it."""
     surf = BRep_Tool.Surface_s(face)
     uv = ShapeAnalysis_Surface(surf).ValueOfUV(point, 1e-7)
@@ -209,6 +202,100 @@ def _face_normal_at_point(face: TopoDS_Face, point: gp_Pnt) -> gp_Dir:
     if face.Orientation() == TopAbs_Orientation.TopAbs_REVERSED:
         normal.Reverse()
     return normal
+
+
+def compute_face_normal(face: TopoDS_Face) -> tuple[float, float, float]:
+    """Compute one representative outward normal for a face.
+
+    Returns (nx, ny, nz). If normal cannot be defined, returns NaNs.
+    """
+    adaptor = BRepAdaptor_Surface(face, False)
+    umin, umax, vmin, vmax = BRepTools.UVBounds_s(face)
+    u_mid = 0.5 * (umin + umax)
+    v_mid = 0.5 * (vmin + vmax)
+    du = (umax - umin) / 4.0
+    dv = (vmax - vmin) / 4.0
+    uv_candidates = [
+        (u_mid, v_mid),
+        (u_mid - du, v_mid),
+        (u_mid + du, v_mid),
+        (u_mid, v_mid - dv),
+        (u_mid, v_mid + dv),
+        (u_mid - du, v_mid - dv),
+        (u_mid + du, v_mid + dv),
+    ]
+
+    for u, v in uv_candidates:
+        props = BRepLProp_SLProps(adaptor, u, v, 1, 1e-6)
+        if not props.IsNormalDefined():
+            continue
+        n = props.Normal()
+        if face.Orientation() == TopAbs_Orientation.TopAbs_REVERSED:
+            n.Reverse()
+        return (n.X(), n.Y(), n.Z())
+
+    return (float("nan"), float("nan"), float("nan"))
+
+
+def compute_face_curvature(face: TopoDS_Face) -> dict[str, float]:
+    """Compute principal, mean, and Gaussian curvature for a face.
+
+    Curvature is evaluated at the face center of mass projected to UV space.
+    Returns NaNs for undefined curvature (e.g., some degenerate points).
+    """
+    adaptor = BRepAdaptor_Surface(face, False)
+    if adaptor.GetType() == GeomAbs_Plane:
+        return {
+            "k_min": 0.0,
+            "k_max": 0.0,
+            "k_mean": 0.0,
+            "k_gaussian": 0.0,
+        }
+
+    def _pack(k_min: float, k_max: float) -> dict[str, float]:
+        return {
+            "k_min": k_min,
+            "k_max": k_max,
+            "k_mean": 0.5 * (k_min + k_max),
+            "k_gaussian": k_min * k_max,
+        }
+
+    # Try several UV samples on trimmed face bounds; COM projection can land
+    # in unstable/singular regions for some free-form patches.
+    umin, umax, vmin, vmax = BRepTools.UVBounds_s(face)
+    u_mid = 0.5 * (umin + umax)
+    v_mid = 0.5 * (vmin + vmax)
+    du = (umax - umin) / 4.0
+    dv = (vmax - vmin) / 4.0
+    uv_candidates = [
+        (u_mid, v_mid),
+        (u_mid - du, v_mid),
+        (u_mid + du, v_mid),
+        (u_mid, v_mid - dv),
+        (u_mid, v_mid + dv),
+        (u_mid - du, v_mid - dv),
+        (u_mid + du, v_mid + dv),
+    ]
+    for u, v in uv_candidates:
+        props = BRepLProp_SLProps(adaptor, u, v, 2, 1e-6)
+        if props.IsCurvatureDefined():
+            return _pack(props.MinCurvature(), props.MaxCurvature())
+
+    # Last attempt: center-of-mass projection to UV.
+    gprop = GProp_GProps()
+    BRepGProp.SurfaceProperties_s(face, gprop)
+    center = gprop.CentreOfMass()
+    uv = ShapeAnalysis_Surface(BRep_Tool.Surface_s(face)).ValueOfUV(center, 1e-7)
+    props = BRepLProp_SLProps(adaptor, uv.X(), uv.Y(), 2, 1e-6)
+    if props.IsCurvatureDefined():
+        return _pack(props.MinCurvature(), props.MaxCurvature())
+
+    return {
+        "k_min": float("nan"),
+        "k_max": float("nan"),
+        "k_mean": float("nan"),
+        "k_gaussian": float("nan"),
+    }
 
 
 def compute_angle_between_faces(
@@ -340,7 +427,8 @@ def visualize_3d(shape, faces_list, face_id_map, G: nx.Graph | None = None, mesh
         fid = int(mesh.cell_data["face_id"][cell_id])
         face = faces_list[fid]
         attrs = compute_face_attributes(face)
-        print(f"\nPicked face_id={fid}  surface_type={attrs['surface_type']}  area={attrs['area']:.6f}  centroid={attrs['centroid']}")
+        print(f"\nPicked face_id={fid}  surface_type={attrs['surface_type']}  normal={attrs['normal']}")
+        # print(f"\nPicked face_id={fid}  surface_type={attrs['surface_type']}  area={attrs['area']:.6f}  centroid={attrs['centroid']}  k_min={attrs['k_min']}  k_max={attrs['k_max']}  k_mean={attrs['k_mean']}  k_gaussian={attrs['k_gaussian']}, normal={attrs['normal']}")
         if G is not None and G.has_node(fid):
             for neighbour in G.neighbors(fid):
                 angle = compute_angle_between_faces(face, faces_list[neighbour])
@@ -374,8 +462,8 @@ def main() -> int:
     args = parser.parse_args()
 
     step_path = args.step
-    shape = load_step(step_path)
-    faces_list, face_id_map = iter_faces(shape)
+    shape, faces_list = read_step_from_user(step_path)
+    face_id_map = iter_faces(faces_list)
     G = build_face_adjacency(faces_list)    
     attach_face_attributes(G, faces_list)
     attach_edge_angles(G, faces_list)

@@ -45,6 +45,12 @@ def pick_face_on_mesh(mesh: pv.PolyData):
 
     return face_id, cell_id, point
 
+def load_step(path: str):
+    reader = STEPControl_Reader()
+    reader.ReadFile(path)
+    reader.TransferRoots()
+    shape = reader.OneShape()
+    return shape
 
 def read_step_from_user(step_path):
     
