@@ -1,0 +1,9 @@
+.vscode/
+Samples/
+__pycache__/
+venv/
+*.step
+*.stp
+*.stl
+*.FCStd
+*.FCBak

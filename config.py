@@ -1,10 +1,12 @@
 import sys
 import argparse
+from pathlib import Path
+from typing import Optional
 
 import pyvista as pv
 import numpy as np
 
-from OCP.STEPControl import STEPControl_Reader
+from OCP.STEPControl import STEPControl_Reader, STEPControl_Writer, STEPControl_AsIs
 from OCP.TopExp import TopExp_Explorer
 from OCP.TopAbs import TopAbs_FACE
 from OCP.TopoDS import TopoDS_Shape, TopoDS_Face, TopoDS
@@ -26,14 +28,11 @@ def pick_face_on_mesh(mesh: pv.PolyData):
     base_color = np.array([200, 200, 200], dtype=np.uint8)
     n_cells = mesh.n_cells
     colors = np.tile(base_color, (n_cells, 1))
-
     mesh.cell_data["colors"] = colors
+
     plotter.add_mesh(mesh, scalars="colors", rgb=True)
     plotter.enable_surface_point_picking(callback=_on_pick)
     plotter.show()
-
-    if not picked_points or not picked_cells:
-        return None, None, None
 
     cell_id = int(picked_cells[-1])
     point = np.array(picked_points[-1], dtype=float)
@@ -53,12 +52,8 @@ def load_step(path: str):
     return shape
 
 def read_step_from_user(step_path):
-    
-    reader = STEPControl_Reader()
-    reader.ReadFile(step_path)
-    reader.TransferRoots()
-    shape = reader.OneShape()
 
+    shape =load_step(step_path)
     # Collect faces
     faces_list: list[TopoDS_Face] = []
     exp = TopExp_Explorer(shape, TopAbs_FACE)
@@ -75,13 +70,8 @@ def _build_face_mesh(shape, faces_list, mesh_deflection = 0.001, angular_deflect
     Tessellate the shape and build a PyVista mesh with cell_data['face_id']
     so that each triangle knows which B-rep face it came from.
     """
-    mesh = BRepMesh_IncrementalMesh(
-        shape, mesh_deflection, False, angular_deflection, True
-    )
+    mesh = BRepMesh_IncrementalMesh(shape, mesh_deflection, False, angular_deflection, True)
     mesh.Perform()
-    if not mesh.IsDone():
-        print("BRepMesh_IncrementalMesh failed", file=sys.stderr)
-        return None
 
     all_verts = []
     all_cells = []
@@ -106,10 +96,6 @@ def _build_face_mesh(shape, faces_list, mesh_deflection = 0.001, angular_deflect
 
         offset += tri.NbNodes()
 
-    if not all_verts:
-        print("No triangulation produced.", file=sys.stderr)
-        return None
-
     verts = np.array(all_verts, dtype=float)
     cells = np.array(all_cells, dtype=np.int64)
     face_ids = np.array(all_face_ids, dtype=np.int32)
@@ -120,15 +106,14 @@ def _build_face_mesh(shape, faces_list, mesh_deflection = 0.001, angular_deflect
 
 # Volume removal visualization
 def build_mesh_for_shape(shape, mesh_deflection= 0.001, angular_deflection = 0.5):
-
+    # if we have faces list we can easily remove this function
     faces_list: list[TopoDS_Face] = []
     exp = TopExp_Explorer(shape, TopAbs_FACE)
     while exp.More():
         face = TopoDS.Face_s(exp.Current())
         faces_list.append(face)
         exp.Next()
-    if not faces_list:
-        return None
+
     return _build_face_mesh(
         shape, faces_list,
         mesh_deflection=mesh_deflection,
@@ -138,57 +123,45 @@ def build_mesh_for_shape(shape, mesh_deflection= 0.001, angular_deflection = 0.5
 
 def pick_brep_face( shape, faces_list, mesh_deflection = 0.001):
     mesh = _build_face_mesh(shape, faces_list, mesh_deflection=mesh_deflection)
-    if mesh is None:
-        return None
-    face_id, cell_id, point = pick_face_on_mesh(mesh)
-    if face_id is None:
-        return None
-    if 0 <= face_id < len(faces_list):
-        return faces_list[face_id]
-    return None
+    face_id, cell_id, _ = pick_face_on_mesh(mesh)
+    return faces_list[face_id]
 
 
 def visualize_faces_on_mesh(shape, faces_list, selected_face_ids, mesh_deflection = 0.001):
     mesh = _build_face_mesh(shape, faces_list, mesh_deflection=mesh_deflection)
-    if mesh is None:
-        return
-    if not selected_face_ids:
-        selected_ids_set = set()
-    else:
-        selected_ids_set = set(int(i) for i in selected_face_ids)
-
+    selected_ids_set = set(int(i) for i in selected_face_ids)
     face_ids = mesh.cell_data.get("face_id")
-    if face_ids is None:
-        return
-
     n_cells = mesh.n_cells
     base_color = np.array([200, 200, 200], dtype=np.uint8)
     highlight_color = np.array([255, 0, 0], dtype=np.uint8)
-
     colors = np.tile(base_color, (n_cells, 1))
     mask = np.isin(face_ids, list(selected_ids_set))
     colors[mask] = highlight_color
-
     mesh.cell_data["colors"] = colors
-
     plotter = pv.Plotter()
     plotter.add_mesh(mesh, scalars="colors", rgb=True)
     plotter.show()
 
 
-def main():
-    parser = argparse.ArgumentParser(description="Read STEP and expose faces")
-    parser.add_argument("--step", required=True, help="Path to STEP file")
-    args = parser.parse_args()
+def save_shape_to_step(shape: TopoDS_Shape, path: str):
 
-    step_path = args.step
-    shape, faces = read_step_from_user(step_path)
-    face = pick_brep_face(shape, faces)
-    if face is None:
-        print("No face picked.")
-    else:
-        print(face)
+    writer = STEPControl_Writer()
+    writer.Transfer(shape, STEPControl_AsIs)
+    status = writer.Write(path)
 
 
-if __name__ == "__main__":
-    raise SystemExit(main())
+def step_to_stl(
+    step_path: str,
+    stl_path: Optional[str] = None,
+    mesh_deflection: float = 0.001,
+    angular_deflection: float = 0.5,
+) -> str:
+
+    shape = load_step(step_path)
+    mesh = build_mesh_for_shape(shape,mesh_deflection=mesh_deflection,angular_deflection=angular_deflection)
+    out_path = Path(stl_path) if stl_path else Path(step_path).with_suffix(".stl")
+    mesh.triangulate().clean().save(str(out_path))
+    print(f"Saved STL: {out_path}")
+    return str(out_path)
+
+
