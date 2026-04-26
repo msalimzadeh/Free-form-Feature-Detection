@@ -114,19 +114,4 @@ python main.py --part model.step --stock stock.step --dir 0 0 -1 --out removal.s
 ```
 
 
-## Sample Data
-
-The `Samples/` directory contains 24 test cases ranging from simple synthetic shapes to complex real-world industrial parts:
-
-| Category | Cases | Description |
-|----------|-------|-------------|
-| `freecad_models` | 1–10 | Simple and mid-complexity parts created in FreeCAD |
-| `complex_models` | 11–24 | Real-world parts: molds, fans, juice squeezers, hangers, spoons, buttons |
-| `Freeform Categories` | — | Reference shapes illustrating different freeform surface types |
-
-Each case includes a reference `.png` image, an `.stl` mesh, and (where applicable) `.step` files for part and stock.
-
----
-
-
 
